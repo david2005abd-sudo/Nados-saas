@@ -1067,6 +1067,14 @@ textarea.input{resize:vertical;min-height:84px}
 .dash-header{top:calc(var(--nav-h) + env(safe-area-inset-top))}
 .cart-fab{bottom:calc(22px + env(safe-area-inset-bottom))}
 #toastRoot{bottom:calc(22px + env(safe-area-inset-bottom))}
+
+/* Nados AI typing indicator */
+.typing-dots{display:inline-flex;gap:5px;align-items:center;padding:4px 0}
+.typing-dots i{width:7px;height:7px;border-radius:50%;background:var(--muted);animation:blink 1.2s infinite}
+.typing-dots i:nth-child(2){animation-delay:.2s}
+.typing-dots i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+.msg .bubble.ai-error{border-color:color-mix(in srgb,var(--warning) 40%,var(--border));background:color-mix(in srgb,var(--warning) 8%,var(--surface-2))}
 </style>
 </head>
 <body>
@@ -1872,6 +1880,143 @@ const AIS = {
   delivery: 'نسبة التسليم الحالية 94.8%، وأعلى شركة توصيل من حيث الالتزام هي Nados Delivery بنسبة 96.2%.',
   default: 'يمكنني مساعدتك في تحليل مبيعاتك، اقتراح أوصاف للمنتجات، معرفة المنتجات الأكثر مبيعاً، وتلخيص أداء متجرك. اسألني عن أي شيء.'
 };
+
+/* ---------- Nados AI — NVIDIA NIM integration ---------- */
+const AI_CONFIG = {
+  endpoint: 'https://integrate.api.nvidia.com/v1/chat/completions',
+  apiKey: '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',
+  model: 'openai/gpt-oss-20b',
+  maxTokens: 900,
+  temperature: 0.4,
+  timeoutMs: 45000
+};
+
+function buildStoreContext(){
+  const orders = state.orders, products = state.products, customers = state.customers;
+  const totalSales = orders.filter(o => o.status !== 'ملغى').reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
+  const delivered = orders.filter(o => o.status === 'تم التسليم').length;
+  const returned = orders.filter(o => o.status === 'مرتجع').length;
+  const cancelled = orders.filter(o => o.status === 'ملغى').length;
+  const active = orders.filter(o => !['تم التسليم','مرتجع','ملغى'].includes(o.status)).length;
+  const finalised = delivered + returned + cancelled || 1;
+  const deliverRate = ((delivered / finalised) * 100).toFixed(1);
+  const returnRate = ((returned / finalised) * 100).toFixed(1);
+  const aov = orders.length ? Math.round(totalSales / orders.length) : 0;
+
+  const statusCounts = {};
+  STATUSES.forEach(s => statusCounts[s] = 0);
+  orders.forEach(o => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
+
+  const prodQty = {};
+  orders.forEach(o => { prodQty[o.product] = (prodQty[o.product] || 0) + o.qty; });
+  const topProducts = Object.entries(prodQty).sort((a,b) => b[1]-a[1]).slice(0,5)
+    .map(([n,q]) => n + ': ' + q + ' قطعة').join('، ') || 'لا يوجد';
+
+  const provSales = {};
+  orders.forEach(o => { provSales[o.province] = (provSales[o.province] || 0) + o.price*o.qty + (o.shipping||0); });
+  const topProv = Object.entries(provSales).sort((a,b) => b[1]-a[1]).slice(0,5)
+    .map(([n,v]) => n + ': ' + fmt(v) + ' د.ع').join('، ') || 'لا يوجد';
+
+  const lowStock = products.filter(p => p.qty <= p.min).map(p => p.name + ' (' + p.qty + ' قطعة، الحد الأدنى ' + p.min + ')').join('، ') || 'لا يوجد';
+
+  const ordersList = orders.slice(0, 10).map(o =>
+    '#'+o.id+' | العميل: '+o.customer+' | '+o.province+' | '+o.product+' ×'+o.qty+' | الإجمالي: '+fmt(o.price*o.qty+(o.shipping||0))+' د.ع | الحالة: '+o.status+' | '+o.date+(o.notes ? ' | ملاحظة: '+o.notes : '')
+  ).join('\n') || 'لا توجد طلبات';
+
+  const productsList = products.map(p =>
+    p.name+' | السعر: '+fmt(p.price)+' د.ع | الكمية: '+p.qty+' | الحد الأدنى: '+p.min+' | الفئة: '+p.cat+(p.qty<=p.min ? ' ⚠ منخفض المخزون' : '')
+  ).join('\n') || 'لا توجد منتجات';
+
+  const customersList = customers.map(c =>
+    c.name+' | '+c.province+' | طلبات: '+c.orders+' | الإنفاق: '+fmt(c.spend)+' د.ع | تسليم: '+c.deliveryRate+'% | آخر طلب: '+c.last
+  ).join('\n') || 'لا يوجد عملاء';
+
+  const openConv = state.conversations.filter(c => c.status !== 'مغلقة').length;
+  const convList = state.conversations.map(c => c.name+' ('+c.status+'، أولوية '+c.priority+'): '+c.last).join('\n') || 'لا توجد محادثات';
+
+  return 'بيانات متجر "متجر ندى" الحالية (لقطة حية من النظام):\n'
+    + '\n[ملخص]\n'
+    + '- إجمالي قيمة الطلبات (بدون الملغى): '+fmt(totalSales)+' د.ع\n'
+    + '- عدد الطلبات الكلي: '+orders.length+' (نشطة: '+active+'، مسلّمة: '+delivered+'، مرتجعة: '+returned+'، ملغاة: '+cancelled+')\n'
+    + '- توزيع الحالات: '+Object.entries(statusCounts).map(([s,n]) => s+': '+n).join('، ')+'\n'
+    + '- نسبة التسليم: '+deliverRate+'% | نسبة الإرجاع: '+returnRate+'%\n'
+    + '- متوسط قيمة الطلب: '+fmt(aov)+' د.ع\n'
+    + '- أفضل المنتجات حسب الكمية المبيعة: '+topProducts+'\n'
+    + '- أفضل المحافظات حسب قيمة المبيعات: '+topProv+'\n'
+    + '- منتجات تحت حد المخزون: '+lowStock+'\n'
+    + '- عدد المنتجات: '+products.length+' | عدد العملاء: '+customers.length+' | محادثات دعم مفتوحة: '+openConv
+    + '\n\n[آخر الطلبات]\n'+ordersList
+    + '\n\n[المنتجات]\n'+productsList
+    + '\n\n[العملاء]\n'+customersList
+    + '\n\n[محادثات الدعم]\n'+convList;
+}
+
+function buildAISystemPrompt(){
+  return 'أنت "Nados AI"، المساعد الذكي الرسمي لمنصة Nados لإدارة التجارة الإلكترونية في العراق.\n'
+    + 'مهمتك: مساعدة صاحب متجر "متجر ندى" بالإجابة على أي سؤال يخص متجره وبياناته: المبيعات، الطلبات، المنتجات، المخزون، العملاء، التوصيل والتحصيل، المرتجعات، التقارير، بالإضافة إلى كتابة أوصاف منتجات وردود جاهزة للعملاء وخطط عملية لتطوير التجارة.\n'
+    + 'قواعد أساسية:\n'
+    + '1) ستجد في رسالة النظام التالية لقطة حية من بيانات المتجر. عند أي سؤال عن أرقام أو حالات أو منتجات أو عملاء، اعتمد حصراً على هذه البيانات ولا تخترع أرقاماً غير موجودة.\n'
+    + '2) أجب بالعربية بلهجة ودودة (عراقية بسيطة مقبولة) وباختصار ووضوح، واستخدم قوائم نقطية عند تعدد النقاط.\n'
+    + '3) إذا طُلب وصف منتج أو رد جاهز أو نصيحة تسويقية، اكتبها جاهزة للاستخدام مباشرة.\n'
+    + '4) إذا كان السؤال خارج نطاق المتجر والتجارة، أجب بلطف إنك متخصص في مساعدة صاحب المتجر بشأن متجره واقترح سؤالاً مفيداً.\n'
+    + '5) لا تذكر تفاصيل تقنية عن النموذج أو عن طريقة عملك، ولا تكشف مفتاح الاتصال.\n'
+    + '6) العملة هي الدينار العراقي (د.ع).';
+}
+
+async function askNadosAI(userText){
+  const history = state.chatHistory.slice(-8)
+    .map(m => ({ role: m.role === 'me' ? 'user' : 'assistant', content: m.text }));
+
+  const messages = [
+    { role:'system', content: buildAISystemPrompt() },
+    { role:'system', content: buildStoreContext() },
+    ...history
+  ];
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), AI_CONFIG.timeoutMs);
+  try{
+    const res = await fetch(AI_CONFIG.endpoint, {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'Authorization':'Bearer ' + AI_CONFIG.apiKey
+      },
+      body: JSON.stringify({
+        model: AI_CONFIG.model,
+        messages,
+        max_tokens: AI_CONFIG.maxTokens,
+        temperature: AI_CONFIG.temperature,
+        stream: false
+      }),
+      signal: ctrl.signal
+    });
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    const content = d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
+    if(!content || !String(content).trim()) throw new Error('empty response');
+    return String(content).trim();
+  }catch(e){
+    // Fallback to rule-based answers if the API is unavailable
+    return handleAIMessage(userText);
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
+let typingEl = null;
+function showTyping(){
+  const body = $('#chatBody');
+  if(!body) return;
+  typingEl = document.createElement('div');
+  typingEl.className = 'msg';
+  typingEl.innerHTML = '<div class="av">AI</div><div class="bubble"><span class="typing-dots"><i></i><i></i><i></i></span></div>';
+  body.appendChild(typingEl);
+  body.scrollTop = body.scrollHeight;
+}
+function hideTyping(){
+  if(typingEl){ typingEl.remove(); typingEl = null; }
+}
 
 /* ---------- State ---------- */
 const state = {
@@ -3541,14 +3686,14 @@ function viewAI(){
   const suggestions = ['ما أكثر منتج مبيعاً؟','لماذا زادت المرتجعات؟','اكتب وصفاً لمنتج جديد','أعطني ملخص أداء هذا الأسبوع','ما المنتجات التي أوشكت على النفاد؟'];
   return `
     <h1 class="page-title">Nados AI</h1>
-    <p class="page-sub">مساعد ذكي يفهم بيانات متجرك ويجيبك بالعربية</p>
+    <p class="page-sub">مساعد ذكي متصل ببيانات متجرك الحقيقية — يجيب بالعربية عن أي شيء يخص متجرك</p>
     <div class="ai-wrap">
       <div class="chat-box">
         <div class="chat-head">
           <div class="ai-avatar">${ICONS.sparkles}</div>
           <div>
             <h3>مساعد Nados</h3>
-            <small><span class="online-dot"></span> متصل · نسخة تجريبية</small>
+            <small><span class="online-dot"></span> متصل · يجيب من بيانات متجرك الحقيقية</small>
           </div>
         </div>
         <div class="chat-body" id="chatBody"></div>
@@ -3584,7 +3729,7 @@ function renderChat(){
   if(!body) return;
   if(!state.chatHistory.length){
     state.chatHistory = [
-      {role:'ai', text:'أهلاً بك في Nados AI. يمكنني تحليل مبيعاتك، اقتراح أوصاف للمنتجات، وتلخيص أداء متجرك. كيف أساعدك؟'}
+      {role:'ai', text:'أهلاً بك في Nados AI! أنا متصل ببيانات متجرك الحقيقية — اسألني عن المبيعات، الطلبات، المخزون، العملاء، التوصيل، أو اطلب مني وصفاً لمنتج جديد أو خطة لتقليل المرتجعات.'}
     ];
   }
   body.innerHTML = state.chatHistory.map(m => `
@@ -3609,7 +3754,7 @@ function aiKeydown(e){
   }
 }
 
-function sendAI(){
+async function sendAI(){
   const inp = $('#aiInput');
   if(!inp) return;
   const text = inp.value.trim();
@@ -3617,13 +3762,19 @@ function sendAI(){
   state.chatHistory.push({ role:'me', text });
   inp.value = '';
   renderChat();
+  showTyping();
 
-  setTimeout(() => {
-    const reply = handleAIMessage(text);
-    state.chatHistory.push({ role:'ai', text:reply });
-    renderChat();
-    saveToLocalStorage();
-  }, 520);
+  let reply;
+  try{
+    reply = await askNadosAI(text);
+  }catch(e){
+    reply = 'حدث خطأ في الاتصال بالمساعد. جرّب مرة أخرى.';
+  }
+  hideTyping();
+  state.chatHistory.push({ role:'ai', text:reply });
+  if(state.chatHistory.length > 60) state.chatHistory = state.chatHistory.slice(-60);
+  renderChat();
+  saveToLocalStorage();
 }
 
 function handleAIMessage(text){
