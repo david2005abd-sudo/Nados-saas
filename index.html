@@ -1891,7 +1891,27 @@ const AI_CONFIG = {
   timeoutMs: 45000
 };
 
+function dayNameAr(dateStr){
+  try{
+    const days = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+    const dt = new Date(dateStr + 'T00:00:00');
+    return isNaN(dt.getTime()) ? dateStr : days[dt.getDay()];
+  }catch(e){ return dateStr; }
+}
+
+function getDailySales(){
+  const map = {};
+  state.orders.forEach(o => {
+    const d = o.date || today();
+    if(!map[d]) map[d] = { v:0, o:0 };
+    map[d].o += 1;
+    if(o.status !== 'ملغى') map[d].v += (o.price*o.qty) + (o.shipping||0);
+  });
+  return Object.keys(map).sort().slice(-7).map(d => ({ date:d, d:dayNameAr(d), v:map[d].v, o:map[d].o }));
+}
+
 function buildStoreContext(){
+  const now = new Date().toLocaleString('en-GB', { hour12:false });
   const orders = state.orders, products = state.products, customers = state.customers;
   const totalSales = orders.filter(o => o.status !== 'ملغى').reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
   const delivered = orders.filter(o => o.status === 'تم التسليم').length;
@@ -1907,55 +1927,103 @@ function buildStoreContext(){
   STATUSES.forEach(s => statusCounts[s] = 0);
   orders.forEach(o => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
 
-  const prodQty = {};
-  orders.forEach(o => { prodQty[o.product] = (prodQty[o.product] || 0) + o.qty; });
-  const topProducts = Object.entries(prodQty).sort((a,b) => b[1]-a[1]).slice(0,5)
-    .map(([n,q]) => n + ': ' + q + ' قطعة').join('، ') || 'لا يوجد';
-
-  const provSales = {};
-  orders.forEach(o => { provSales[o.province] = (provSales[o.province] || 0) + o.price*o.qty + (o.shipping||0); });
-  const topProv = Object.entries(provSales).sort((a,b) => b[1]-a[1]).slice(0,5)
-    .map(([n,v]) => n + ': ' + fmt(v) + ' د.ع').join('، ') || 'لا يوجد';
-
-  const lowStock = products.filter(p => p.qty <= p.min).map(p => p.name + ' (' + p.qty + ' قطعة، الحد الأدنى ' + p.min + ')').join('، ') || 'لا يوجد';
-
-  const ordersList = orders.slice(0, 10).map(o =>
-    '#'+o.id+' | العميل: '+o.customer+' | '+o.province+' | '+o.product+' ×'+o.qty+' | الإجمالي: '+fmt(o.price*o.qty+(o.shipping||0))+' د.ع | الحالة: '+o.status+' | '+o.date+(o.notes ? ' | ملاحظة: '+o.notes : '')
+  /* الطلبات — قائمة كاملة (حتى 40 طلباً) */
+  const MAX_ORDERS = 40;
+  const shown = orders.slice(0, MAX_ORDERS);
+  const ordersList = shown.map(o =>
+    '#'+o.id+' | العميل: '+o.customer+' | هاتف: '+o.phone+' | '+o.province+' | العنوان: '+o.address
+    +' | المنتج: '+o.product+' ×'+o.qty+' (سعر الوحدة '+fmt(o.price)+')'
+    +' | الإجمالي: '+fmt(o.price*o.qty+(o.shipping||0))+' د.ع (منها توصيل '+fmt(o.shipping||0)+')'
+    +' | الحالة: '+o.status+' | التاريخ: '+o.date
+    +(o.notes ? ' | ملاحظات: '+o.notes : '')
   ).join('\n') || 'لا توجد طلبات';
+  const ordersNote = orders.length > MAX_ORDERS ? '\n(وتبقى '+(orders.length-MAX_ORDERS)+' طلبات أخرى غير معروضة)' : '';
 
+  /* المنتجات والمخزون */
+  const prodQty = {}, prodRev = {};
+  orders.forEach(o => {
+    prodQty[o.product] = (prodQty[o.product] || 0) + o.qty;
+    prodRev[o.product] = (prodRev[o.product] || 0) + o.price*o.qty;
+  });
+  const inventoryValue = products.reduce((s,p) => s + p.price*p.qty, 0);
+  const outOfStock = products.filter(p => !p.qty).map(p => p.name);
+  const lowStock = products.filter(p => p.qty <= p.min && p.qty > 0).map(p => p.name + ' (' + p.qty + ' قطعة، الحد الأدنى ' + p.min + ')');
   const productsList = products.map(p =>
-    p.name+' | السعر: '+fmt(p.price)+' د.ع | الكمية: '+p.qty+' | الحد الأدنى: '+p.min+' | الفئة: '+p.cat+(p.qty<=p.min ? ' ⚠ منخفض المخزون' : '')
+    p.name+' | السعر: '+fmt(p.price)+' د.ع | الكمية المتوفرة: '+p.qty+' | الحد الأدنى: '+p.min+' | الفئة: '+p.cat
+    +' | المبيعات التراكمية: '+(prodQty[p.name]||0)+' قطعة بقيمة '+fmt(prodRev[p.name]||0)+' د.ع'
+    +(p.qty === 0 ? ' | ⚠ نفد من المخزون' : (p.qty <= p.min ? ' | ⚠ منخفض المخزون' : ' | ✓ متوفر'))
   ).join('\n') || 'لا توجد منتجات';
 
+  /* العملاء */
+  const repeatCustomers = customers.filter(c => c.orders >= 2);
+  const topSpender = [...customers].sort((a,b) => b.spend - a.spend)[0];
+  const custByProv = {};
+  customers.forEach(c => { custByProv[c.province] = (custByProv[c.province] || 0) + 1; });
   const customersList = customers.map(c =>
-    c.name+' | '+c.province+' | طلبات: '+c.orders+' | الإنفاق: '+fmt(c.spend)+' د.ع | تسليم: '+c.deliveryRate+'% | آخر طلب: '+c.last
+    c.name+' | '+c.province+' | هاتف: '+c.phone+' | طلبات: '+c.orders+' | الإنفاق الكلي: '+fmt(c.spend)+' د.ع'
+    +' | نسبة تسليم طلباته: '+c.deliveryRate+'% | آخر طلب: '+c.last+(c.orders >= 2 ? ' | عميل متكرر' : '')
   ).join('\n') || 'لا يوجد عملاء';
 
-  const openConv = state.conversations.filter(c => c.status !== 'مغلقة').length;
-  const convList = state.conversations.map(c => c.name+' ('+c.status+'، أولوية '+c.priority+'): '+c.last).join('\n') || 'لا توجد محادثات';
+  /* التوصيل والتحصيل */
+  const inTransit = orders.filter(o => o.status === 'مع شركة التوصيل');
+  const expectedCollection = inTransit.reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
+  const deliveredRevenue = orders.filter(o => o.status === 'تم التسليم').reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
+  const returnsList = orders.filter(o => o.status === 'مرتجع').map(o => '#'+o.id+' ('+o.customer+'، '+o.province+')'+(o.notes ? ' السبب: '+o.notes : '')).join('، ') || 'لا يوجد';
+  const cancelledList = orders.filter(o => o.status === 'ملغى').map(o => '#'+o.id+' ('+o.customer+')'+(o.notes ? ' السبب: '+o.notes : '')).join('، ') || 'لا يوجد';
+  const companiesDir = 'Nados Delivery (التزام 96.2%)، سريع (92.4%)، طريقك (88.1%)، مندوب المدينة (90.7%)';
 
-  return 'بيانات متجر "متجر ندى" الحالية (لقطة حية من النظام):\n'
-    + '\n[ملخص]\n'
+  /* التقارير — سلسلة يومية حقيقية */
+  const daily = getDailySales();
+  const dailyStr = daily.length
+    ? daily.map(x => x.date+' ('+x.d+'): '+fmt(x.v)+' د.ع من '+x.o+' طلب').join('\n')
+    : 'لا توجد بيانات';
+  const topByQty = Object.entries(prodQty).sort((a,b) => b[1]-a[1]).slice(0,5).map(([n,q]) => n+': '+q+' قطعة').join('، ') || 'لا يوجد';
+  const topByRev = Object.entries(prodRev).sort((a,b) => b[1]-a[1]).slice(0,5).map(([n,v]) => n+': '+fmt(v)+' د.ع').join('، ') || 'لا يوجد';
+  const provSales = {};
+  orders.forEach(o => { if(o.status !== 'ملغى') provSales[o.province] = (provSales[o.province] || 0) + o.price*o.qty + (o.shipping||0); });
+  const topProv = Object.entries(provSales).sort((a,b) => b[1]-a[1]).slice(0,5).map(([n,v]) => n+': '+fmt(v)+' د.ع').join('، ') || 'لا يوجد';
+
+  /* محادثات الدعم — بالرسائل */
+  const convList = state.conversations.map(c =>
+    c.name+' ('+c.status+'، أولوية '+c.priority+'، مسندة إلى: '+c.assigned+')\n'
+    + c.messages.slice(-6).map(m => '   '+(m.from === 'agent' ? 'المتجر' : 'العميل')+' ['+m.time+']: '+m.text).join('\n')
+  ).join('\n---\n') || 'لا توجد محادثات';
+  const openConv = state.conversations.filter(c => c.status !== 'مغلقة').length;
+
+  return 'بيانات متجر "متجر ندى" الحقيقية — لقطة لحظية وقت السؤال (وقت اللقطة: '+now+')\n'
+    + '\n[الملخص التنفيذي]\n'
     + '- إجمالي قيمة الطلبات (بدون الملغى): '+fmt(totalSales)+' د.ع\n'
-    + '- عدد الطلبات الكلي: '+orders.length+' (نشطة: '+active+'، مسلّمة: '+delivered+'، مرتجعة: '+returned+'، ملغاة: '+cancelled+')\n'
+    + '- الطلبات: '+orders.length+' إجمالاً (نشطة قيد المعالجة: '+active+'، مسلّمة: '+delivered+'، مرتجعة: '+returned+'، ملغاة: '+cancelled+')\n'
     + '- توزيع الحالات: '+Object.entries(statusCounts).map(([s,n]) => s+': '+n).join('، ')+'\n'
-    + '- نسبة التسليم: '+deliverRate+'% | نسبة الإرجاع: '+returnRate+'%\n'
-    + '- متوسط قيمة الطلب: '+fmt(aov)+' د.ع\n'
-    + '- أفضل المنتجات حسب الكمية المبيعة: '+topProducts+'\n'
-    + '- أفضل المحافظات حسب قيمة المبيعات: '+topProv+'\n'
-    + '- منتجات تحت حد المخزون: '+lowStock+'\n'
-    + '- عدد المنتجات: '+products.length+' | عدد العملاء: '+customers.length+' | محادثات دعم مفتوحة: '+openConv
-    + '\n\n[آخر الطلبات]\n'+ordersList
-    + '\n\n[المنتجات]\n'+productsList
+    + '- نسبة التسليم: '+deliverRate+'% | نسبة الإرجاع: '+returnRate+'% | متوسط قيمة الطلب: '+fmt(aov)+' د.ع\n'
+    + '- المنتجات: '+products.length+' | العملاء: '+customers.length+' (متكررون: '+repeatCustomers.length+') | محادثات دعم مفتوحة: '+openConv
+    + '\n\n[الطلبات — القائمة الكاملة الأحدث أولاً]\n'+ordersList+ordersNote
+    + '\n\n[المنتجات والمخزون]\n'+productsList
+    + '\n- قيمة المخزون الحالية: '+fmt(inventoryValue)+' د.ع'
+    + '\n- منتجات نفدت: '+(outOfStock.join('، ') || 'لا يوجد')
+    + '\n- منتجات تحت حد التنبيه: '+(lowStock.join('، ') || 'لا يوجد')
     + '\n\n[العملاء]\n'+customersList
-    + '\n\n[محادثات الدعم]\n'+convList;
+    + '\n- توزيع العملاء على المحافظات: '+Object.entries(custByProv).map(([n,c]) => n+': '+c).join('، ')
+    + '\n- العميل الأعلى إنفاقاً: '+(topSpender ? topSpender.name+' ('+fmt(topSpender.spend)+' د.ع)' : 'لا يوجد')
+    + '\n\n[التوصيل والتحصيل]\n'
+    + '- شحنات قيد التوصيل الآن: '+inTransit.length+(inTransit.length ? ' ('+inTransit.map(o => '#'+o.id+' لـ'+o.customer+' — '+o.province).join('، ')+')' : '')
+    + '\n- المبالغ المتوقعة تحصيلها من الشحنات الجارية: '+fmt(expectedCollection)+' د.ع'
+    + '\n- إجمالي ما تم تسليمه فعلياً (قيمة): '+fmt(deliveredRevenue)+' د.ع'
+    + '\n- الطلبات المرتجعة: '+returnsList
+    + '\n- الطلبات الملغاة: '+cancelledList
+    + '\n- شركات التوصيل المتعاقدة: '+companiesDir
+    + '\n\n[التقارير — المبيعات اليومية (آخر الأيام المسجلة)]\n'+dailyStr
+    + '\n- أفضل المنتجات حسب الكمية: '+topByQty
+    + '\n- أفضل المنتجات حسب الإيراد: '+topByRev
+    + '\n- أفضل المحافظات حسب الإيراد: '+topProv
+    + '\n\n[محادثات الدعم — كاملة]\n'+convList;
 }
 
 function buildAISystemPrompt(){
   return 'أنت "Nados AI"، المساعد الذكي الرسمي لمنصة Nados لإدارة التجارة الإلكترونية في العراق.\n'
     + 'مهمتك: مساعدة صاحب متجر "متجر ندى" بالإجابة على أي سؤال يخص متجره وبياناته: المبيعات، الطلبات، المنتجات، المخزون، العملاء، التوصيل والتحصيل، المرتجعات، التقارير، بالإضافة إلى كتابة أوصاف منتجات وردود جاهزة للعملاء وخطط عملية لتطوير التجارة.\n'
     + 'قواعد أساسية:\n'
-    + '1) ستجد في رسالة النظام التالية لقطة حية من بيانات المتجر. عند أي سؤال عن أرقام أو حالات أو منتجات أو عملاء، اعتمد حصراً على هذه البيانات ولا تخترع أرقاماً غير موجودة.\n'
+    + '1) ستجد في رسالة النظام التالية لقطة لحظية كاملة من بيانات المتجر مأخوذة وقت السؤال نفسه (مع طابع الوقت). تغطي: كل الطلبات بالتفصيل، المنتجات والمخزون، العملاء، التوصيل والتحصيل، التقارير اليومية، ومحادثات الدعم. عند أي سؤال عن أرقام أو حالات أو منتجات أو عملاء، اعتمد حصراً على هذه البيانات ولا تخترع أرقاماً غير موجودة. إذا سُئلت عن طلب أو منتج أو عميل بالاسم، ابحث عنه في اللقطة وأعطِ كل تفاصيله.\n'
     + '2) أجب بالعربية بلهجة ودودة (عراقية بسيطة مقبولة) وباختصار ووضوح، واستخدم قوائم نقطية عند تعدد النقاط.\n'
     + '3) إذا طُلب وصف منتج أو رد جاهز أو نصيحة تسويقية، اكتبها جاهزة للاستخدام مباشرة.\n'
     + '4) إذا كان السؤال خارج نطاق المتجر والتجارة، أجب بلطف إنك متخصص في مساعدة صاحب المتجر بشأن متجره واقترح سؤالاً مفيداً.\n'
@@ -3149,15 +3217,18 @@ function viewOverview(){
 }
 
 function buildSalesChart(){
-  const data = [
-    {d:'السبت', v:1250000, o:52},
-    {d:'الأحد', v:980000, o:41},
-    {d:'الاثنين', v:1680000, o:67},
-    {d:'الثلاثاء', v:1420000, o:58},
-    {d:'الأربعاء', v:1920000, o:79},
-    {d:'الخميس', v:2340000, o:94},
-    {d:'الجمعة', v:1760000, o:72}
-  ];
+  let data = getDailySales();
+  if(data.length < 2){
+    data = [
+      {d:'السبت', v:1250000, o:52},
+      {d:'الأحد', v:980000, o:41},
+      {d:'الاثنين', v:1680000, o:67},
+      {d:'الثلاثاء', v:1420000, o:58},
+      {d:'الأربعاء', v:1920000, o:79},
+      {d:'الخميس', v:2340000, o:94},
+      {d:'الجمعة', v:1760000, o:72}
+    ];
+  }
   const W = 620, H = 210, PAD = 18;
   const max = Math.max(...data.map(d => d.v)) * 1.12;
   const stepX = (W - PAD*2) / (data.length - 1);
@@ -3682,18 +3753,43 @@ function exportOrdersCSV(){
 }
 
 /* ---------- AI ---------- */
+const LIVE_ANALYSIS_PROMPT = 'حلل متجري الآن لحظة بلحظة بالتفصيل: المبيعات والطلبات النشطة، حالة المخزون وما يحتاج إعادة طلب، أفضل المنتجات والعملاء والمحافظات، وضع التوصيل والتحصيل والمرتجعات، ثم أعطني 5 توصيات عملية مرتبة بالأولوية لأزيد الربح وأقلل المشاكل.';
+
 function viewAI(){
-  const suggestions = ['ما أكثر منتج مبيعاً؟','لماذا زادت المرتجعات؟','اكتب وصفاً لمنتج جديد','أعطني ملخص أداء هذا الأسبوع','ما المنتجات التي أوشكت على النفاد؟'];
+  const suggestions = ['حلل متجري الآن لحظياً','ما أكثر منتج مبيعاً؟','شنو الطلبات المتأخرة أو المعلقة؟','ما المنتجات التي تحتاج إعادة طلب؟','من أفضل عملائي وشنو يشترون؟','أعطني ملخص التوصيل والتحصيل','اكتب وصفاً لمنتج جديد','كيف أقلل المرتجعات؟'];
+  const orders = state.orders, products = state.products, customers = state.customers;
+  const totalSales = orders.filter(o => o.status !== 'ملغى').reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
+  const delivered = orders.filter(o => o.status === 'تم التسليم').length;
+  const returned = orders.filter(o => o.status === 'مرتجع').length;
+  const cancelled = orders.filter(o => o.status === 'ملغى').length;
+  const finalised = delivered + returned + cancelled || 1;
+  const deliverRate = ((delivered / finalised) * 100).toFixed(1);
+  const inTransit = orders.filter(o => o.status === 'مع شركة التوصيل');
+  const expectedCollection = inTransit.reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
+  const lowStock = products.filter(p => p.qty <= p.min);
+  const inventoryValue = products.reduce((s,p) => s + p.price*p.qty, 0);
+  const repeatCustomers = customers.filter(c => c.orders >= 2).length;
+  const nowTime = new Date().toLocaleTimeString('en-GB', { hour12:false });
+
+  const liveRows = [
+    {lbl:'إجمالي المبيعات', val: money(totalSales), c:'var(--primary)'},
+    {lbl:'الطلبات', val: orders.length + ' طلباً (' + (orders.length - delivered - returned - cancelled) + ' نشط)', c:'var(--primary)'},
+    {lbl:'نسبة التسليم', val: deliverRate + '%', c:'var(--success)'},
+    {lbl:'قيد التوصيل الآن', val: inTransit.length + ' شحنة · تحصيل متوقع ' + money(expectedCollection), c:'#0EA5E9'},
+    {lbl:'المخزون', val: money(inventoryValue) + ' · منخفض: ' + lowStock.length, c: lowStock.length ? 'var(--danger)' : 'var(--secondary)'},
+    {lbl:'العملاء المتكررون', val: repeatCustomers + ' من ' + customers.length, c:'#8B5CF6'}
+  ];
+
   return `
     <h1 class="page-title">Nados AI</h1>
-    <p class="page-sub">مساعد ذكي متصل ببيانات متجرك الحقيقية — يجيب بالعربية عن أي شيء يخص متجرك</p>
+    <p class="page-sub">مساعد ذكي يرى كل بيانات متجرك لحظة بلحظة — الطلبات، المنتجات، المخزون، العملاء، التوصيل، والتقارير</p>
     <div class="ai-wrap">
       <div class="chat-box">
         <div class="chat-head">
           <div class="ai-avatar">${ICONS.sparkles}</div>
           <div>
             <h3>مساعد Nados</h3>
-            <small><span class="online-dot"></span> متصل · يجيب من بيانات متجرك الحقيقية</small>
+            <small><span class="online-dot"></span> متصل · يقرأ بيانات متجرك لحظة كل سؤال</small>
           </div>
         </div>
         <div class="chat-body" id="chatBody"></div>
@@ -3701,7 +3797,7 @@ function viewAI(){
           ${suggestions.map(s => `<button class="chip" onclick="askAI('${esc(s)}')">${esc(s)}</button>`).join('')}
         </div>
         <div class="chat-input-row">
-          <textarea id="aiInput" rows="1" placeholder="اكتب سؤالك هنا..." onkeydown="aiKeydown(event)" aria-label="رسالة إلى Nados AI"></textarea>
+          <textarea id="aiInput" rows="1" placeholder="اسأل عن أي شيء في متجرك..." onkeydown="aiKeydown(event)" aria-label="رسالة إلى Nados AI"></textarea>
           <button class="btn btn-primary" onclick="sendAI()" aria-label="إرسال">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg>
           </button>
@@ -3709,15 +3805,24 @@ function viewAI(){
       </div>
 
       <div class="panel" style="margin:0">
-        <div class="panel-head"><h3>ملخص سريع</h3></div>
-        <div class="status-list">
-          <div class="status-row"><span class="lbl">الطلبات</span><div class="bar"><i style="width:79%;background:var(--primary)"></i></div><span class="val">79</span></div>
-          <div class="status-row"><span class="lbl">المخزون</span><div class="bar"><i style="width:88%;background:var(--secondary)"></i></div><span class="val">88</span></div>
-          <div class="status-row"><span class="lbl">التوصيل</span><div class="bar"><i style="width:84%;background:var(--accent)"></i></div><span class="val">84</span></div>
-          <div class="status-row"><span class="lbl">العملاء</span><div class="bar"><i style="width:77%;background:#8B5CF6"></i></div><span class="val">77</span></div>
+        <div class="panel-head">
+          <h3>بيانات لحظية</h3>
+          <button class="btn btn-soft btn-sm" onclick="askAI(LIVE_ANALYSIS_PROMPT)">تحليل لحظي</button>
         </div>
-        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:13.5px;color:var(--muted);line-height:1.8">
-          أسأل Nados عن المنتجات، المرتجعات، أو اطلب وصفاً جاهزاً لمنتج جديد.
+        <div class="status-list">
+          ${liveRows.map(r => `
+            <div class="status-row">
+              <span class="lbl">${r.lbl}</span>
+              <div class="bar"><i style="width:100%;background:${r.c};opacity:.16"></i></div>
+              <span class="val" style="min-width:auto;font-size:12px;white-space:normal">${r.val}</span>
+            </div>`).join('')}
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:18px;padding-top:16px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)">
+          <span style="display:inline-flex;align-items:center;gap:6px"><span class="online-dot"></span> آخر تحديث: ${nowTime}</span>
+          <button class="btn btn-ghost btn-sm" onclick="renderDashboardPage('ai')">تحديث</button>
+        </div>
+        <div style="margin-top:14px;font-size:13.5px;color:var(--muted);line-height:1.8">
+          اسأل عن أي طلب أو منتج أو عميل بالاسم، أو اطلب تقريراً أو توصيات — يجيب من بيانات متجرك الفعلية.
         </div>
       </div>
     </div>
