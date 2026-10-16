@@ -1931,6 +1931,7 @@ const STATUS_CLASS = {
   'مع شركة التوصيل':'st-ship','تم التسليم':'st-delivered','مرتجع':'st-return','ملغى':'st-cancel'
 };
 const PROVINCES = ['بغداد','ديالى','البصرة','أربيل','النجف','كربلاء','نينوى','واسط'];
+const COMPANIES = ['Nados Delivery','سريع','طريقك','مندوب المدينة'];
 
 /* ---------- State ---------- */
 const DEFAULT_ORDERS = [
@@ -2051,6 +2052,19 @@ function getDailySales(){
   return Object.keys(map).sort().slice(-7).map(d => ({ date:d, d:dayNameAr(d), v:map[d].v, o:map[d].o }));
 }
 
+function getDeliveryByCompany(){
+  return COMPANIES.map(n => {
+    const cos = state.orders.filter(o => (o.company || COMPANIES[0]) === n);
+    const ship = cos.filter(o => o.status === 'مع شركة التوصيل');
+    const del = cos.filter(o => o.status === 'تم التسليم').length;
+    const ret = cos.filter(o => o.status === 'مرتجع').length;
+    const pending = ship.reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
+    const total = del + ret;
+    const rate = total ? ((del / total) * 100).toFixed(1) + '%' : '—';
+    return { n, ship: ship.length, del, ret, pending, rate, shipList: ship };
+  });
+}
+
 function buildStoreContext(){
   const now = new Date().toLocaleString('en-GB', { hour12:false });
   const orders = state.orders, products = state.products, customers = state.customers;
@@ -2075,7 +2089,7 @@ function buildStoreContext(){
     '#'+o.id+' | العميل: '+o.customer+' | هاتف: '+o.phone+' | '+o.province+' | العنوان: '+o.address
     +' | المنتج: '+o.product+' ×'+o.qty+' (سعر الوحدة '+fmt(o.price)+')'
     +' | الإجمالي: '+fmt(o.price*o.qty+(o.shipping||0))+' د.ع (منها توصيل '+fmt(o.shipping||0)+')'
-    +' | الحالة: '+o.status+' | التاريخ: '+o.date
+    +' | الحالة: '+o.status+' | شركة التوصيل: '+(o.company || 'غير مسند')+' | التاريخ: '+o.date
     +(o.notes ? ' | ملاحظات: '+o.notes : '')
   ).join('\n') || 'لا توجد طلبات';
   const ordersNote = orders.length > MAX_ORDERS ? '\n(وتبقى '+(orders.length-MAX_ORDERS)+' طلبات أخرى غير معروضة)' : '';
@@ -2111,7 +2125,11 @@ function buildStoreContext(){
   const deliveredRevenue = orders.filter(o => o.status === 'تم التسليم').reduce((s,o) => s + o.price*o.qty + (o.shipping||0), 0);
   const returnsList = orders.filter(o => o.status === 'مرتجع').map(o => '#'+o.id+' ('+o.customer+'، '+o.province+')'+(o.notes ? ' السبب: '+o.notes : '')).join('، ') || 'لا يوجد';
   const cancelledList = orders.filter(o => o.status === 'ملغى').map(o => '#'+o.id+' ('+o.customer+')'+(o.notes ? ' السبب: '+o.notes : '')).join('، ') || 'لا يوجد';
-  const companiesDir = 'Nados Delivery (التزام 96.2%)، سريع (92.4%)، طريقك (88.1%)، مندوب المدينة (90.7%)';
+  const companiesLive = getDeliveryByCompany().map(c =>
+    c.n + ': قيد التوصيل ' + c.ship + '، مسلّم ' + c.del + '، مرتجع ' + c.ret
+    + '، قيد التسوية ' + fmt(c.pending) + ' د.ع، التزام ' + c.rate
+    + (c.ship ? ' (شحنات جارية: ' + c.shipList.map(o => '#' + o.id).join('، ') + ')' : '')
+  ).join('\n');
 
   /* التقارير — سلسلة يومية حقيقية */
   const daily = getDailySales();
@@ -2152,7 +2170,7 @@ function buildStoreContext(){
     + '\n- إجمالي ما تم تسليمه فعلياً (قيمة): '+fmt(deliveredRevenue)+' د.ع'
     + '\n- الطلبات المرتجعة: '+returnsList
     + '\n- الطلبات الملغاة: '+cancelledList
-    + '\n- شركات التوصيل المتعاقدة: '+companiesDir
+    + '\n- توزيع التوصيل على الشركات (محسوب لحظياً من الطلبات):\n' + companiesLive
     + '\n\n[التقارير — المبيعات اليومية (آخر الأيام المسجلة)]\n'+dailyStr
     + '\n- أفضل المنتجات حسب الكمية: '+topByQty
     + '\n- أفضل المنتجات حسب الإيراد: '+topByRev
@@ -2227,6 +2245,22 @@ function hideTyping(){
   if(typingEl){ typingEl.remove(); typingEl = null; }
 }
 
+/* ---------- Live refresh (لحظة بلحظة) ---------- */
+let aiLiveTimer = null;
+let aiBusy = false;
+
+function startAILiveRefresh(){
+  stopAILiveRefresh();
+  aiLiveTimer = setInterval(() => {
+    if(!document.hidden && state.currentView === 'dashboard' && state.currentDashboardPage === 'ai' && !aiBusy){
+      renderDashboardPage('ai');
+    }
+  }, 20000);
+}
+function stopAILiveRefresh(){
+  if(aiLiveTimer){ clearInterval(aiLiveTimer); aiLiveTimer = null; }
+}
+
 /* ---------- State ---------- */
 const state = {
   currentView: 'landing',
@@ -2285,6 +2319,7 @@ function loadFromLocalStorage(){
 
 function resetState(){
   state.orders = JSON.parse(JSON.stringify(DEFAULT_ORDERS));
+  state.orders.forEach((o,i) => { o.company = COMPANIES[i % COMPANIES.length]; });
   state.products = JSON.parse(JSON.stringify(DEFAULT_PRODUCTS));
   state.customers = JSON.parse(JSON.stringify(DEFAULT_CUSTOMERS));
   state.notifications = JSON.parse(JSON.stringify(DEFAULT_NOTIFICATIONS));
@@ -2526,10 +2561,14 @@ function buildModal(type, data){
                 <input class="input" id="or-price" type="number" min="0" required />
               </div>
             </div>
-            <div class="form-row cols-2">
+            <div class="form-row cols-3">
               <div class="field">
                 <label for="or-ship">أجور التوصيل (د.ع)</label>
                 <input class="input" id="or-ship" type="number" min="0" value="5000" />
+              </div>
+              <div class="field">
+                <label for="or-company">شركة التوصيل</label>
+                <select class="input" id="or-company">${COMPANIES.map(c => `<option value="${c}">${c}</option>`).join('')}</select>
               </div>
               <div class="field">
                 <label for="or-status">حالة الطلب</label>
@@ -2566,6 +2605,7 @@ function buildModal(type, data){
                 <div style="display:flex;justify-content:space-between"><span class="text-muted">الكمية</span><span>${o.qty}</span></div>
                 <div style="display:flex;justify-content:space-between"><span class="text-muted">سعر الوحدة</span><span>${money(o.price)}</span></div>
                 <div style="display:flex;justify-content:space-between"><span class="text-muted">أجور التوصيل</span><span>${money(o.shipping)}</span></div>
+                <div style="display:flex;justify-content:space-between"><span class="text-muted">شركة التوصيل</span><span>${esc(o.company || 'غير مسند')}</span></div>
                 <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);padding-top:9px;font-weight:700"><span>الإجمالي</span><span style="color:var(--primary)">${money(total)}</span></div>
               </div>
             </div>
@@ -2866,6 +2906,7 @@ function switchView(view){
     landing.classList.remove('hidden');
     if(footer) footer.classList.remove('hidden');
     $('#cartFab').classList.remove('hidden');
+    stopAILiveRefresh();
     window.scrollTo({ top:0, behavior:'auto' });
   }
   closeSidebar();
@@ -3183,6 +3224,7 @@ function renderDashboardPage(page){
   }
 
   updateSidebarCounts();
+  if(page === 'ai'){ startAILiveRefresh(); } else { stopAILiveRefresh(); }
   if(page === 'reports') drawReportsChart();
 }
 
@@ -3503,7 +3545,8 @@ function addOrder(){
   const name = g('#or-name'), phone = g('#or-phone'), prov = g('#or-prov'),
         addr = g('#or-addr'), prod = g('#or-prod'), qty = parseInt(g('#or-qty')||'1',10),
         price = parseInt(g('#or-price')||'0',10), ship = parseInt(g('#or-ship')||'0',10),
-        status = g('#or-status') || 'جديد', notes = g('#or-notes');
+        status = g('#or-status') || 'جديد', notes = g('#or-notes'),
+        company = g('#or-company') || COMPANIES[0];
 
   if(!name || !phone || !addr || !prod){
     showToast('error','يرجى إكمال الحقول المطلوبة.');
@@ -3515,7 +3558,7 @@ function addOrder(){
   const newId = 'ORD-' + (1030 + state.orders.length + Math.floor(Math.random()*9) + 1);
   const order = {
     id: newId, customer:name, phone, province:prov, address:addr,
-    product:prod, qty, price, shipping:isNaN(ship)?0:ship, status, date:today(), notes
+    product:prod, qty, price, shipping:isNaN(ship)?0:ship, status, date:today(), notes, company
   };
   state.orders.unshift(order);
 
@@ -3738,30 +3781,31 @@ function viewCustomers(){
 
 /* ---------- Delivery ---------- */
 function viewDelivery(){
-  const companies = [
-    {n:'Nados Delivery', c:'#5B5CE2', shipping:12, delivered:38, returned:2, pending:2100000, rate:'96.2%'},
-    {n:'سريع', c:'#16B8A6', shipping:8, delivered:24, returned:3, pending:1450000, rate:'92.4%'},
-    {n:'طريقك', c:'#F6B73C', shipping:6, delivered:18, returned:4, pending:980000, rate:'88.1%'},
-    {n:'مندوب المدينة', c:'#8B5CF6', shipping:4, delivered:11, returned:1, pending:520000, rate:'90.7%'}
-  ];
+  const byCompany = getDeliveryByCompany();
+  const totalPending = byCompany.reduce((s,c) => s + c.pending, 0);
+  const totalShip = byCompany.reduce((s,c) => s + c.ship, 0);
   return `
     <h1 class="page-title">التوصيل</h1>
-    <p class="page-sub">تابع الشحنات والمرتجعات والمبالغ قيد التسوية</p>
+    <p class="page-sub">${totalShip} شحنة قيد التوصيل الآن · مبالغ قيد التسوية ${money(totalPending)} — محسوبة لحظياً من طلباتك</p>
     <div class="deliv-grid">
-      ${companies.map(c => `
+      ${byCompany.map(c => `
         <div class="deliv-card">
           <div class="deliv-top">
-            <div class="deliv-logo" style="background:${c.c}">${esc(c.n.charAt(0))}</div>
+            <div class="deliv-logo" style="background:${c.n === 'Nados Delivery' ? '#5B5CE2' : c.n === 'سريع' ? '#16B8A6' : c.n === 'طريقك' ? '#F6B73C' : '#8B5CF6'}">${esc(c.n.charAt(0))}</div>
             <div>
               <h4>${esc(c.n)}</h4>
               <small><span class="d d-on" style="width:7px;height:7px;border-radius:50%;background:var(--success);display:inline-block"></span> نسبة الالتزام ${c.rate}</small>
             </div>
           </div>
           <div class="deliv-stats">
-            <div><strong>${c.shipping}</strong><small>قيد التوصيل</small></div>
-            <div><strong style="color:var(--success)">${c.delivered}</strong><small>تم التسليم</small></div>
-            <div><strong style="color:var(--danger)">${c.returned}</strong><small>مرتجع</small></div>
+            <div><strong>${c.ship}</strong><small>قيد التوصيل</small></div>
+            <div><strong style="color:var(--success)">${c.del}</strong><small>تم التسليم</small></div>
+            <div><strong style="color:var(--danger)">${c.ret}</strong><small>مرتجع</small></div>
           </div>
+          ${c.shipList.length ? `
+            <div style="margin-top:12px;font-size:12px;color:var(--muted);line-height:1.7">
+              الشحنات الجارية: ${c.shipList.map(o => '#' + esc(o.id) + ' (' + esc(o.customer) + ' · ' + esc(o.province) + ')').join('، ')}
+            </div>` : ''}
           <div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:13.5px">
             <span class="text-muted">مبالغ قيد التسوية</span>
             <strong style="color:var(--primary)">${money(c.pending)}</strong>
@@ -4005,16 +4049,20 @@ async function sendAI(){
   if(!inp) return;
   const text = inp.value.trim();
   if(!text) return;
+  if(aiBusy){ showToast('info','المساعد يحرّر على رد سابق، لحظات ويكمل.'); return; }
   state.chatHistory.push({ role:'me', text });
   inp.value = '';
   renderChat();
   showTyping();
+  aiBusy = true;
 
   let reply;
   try{
     reply = await askNadosAI(text);
   }catch(e){
     reply = 'حدث خطأ في الاتصال بالمساعد. جرّب مرة أخرى.';
+  }finally{
+    aiBusy = false;
   }
   hideTyping();
   state.chatHistory.push({ role:'ai', text:reply });
@@ -4318,6 +4366,27 @@ function initApp(){
   // Initial view
   if(state.currentView === 'dashboard') switchView('dashboard');
   else switchView('landing');
+
+  // Cross-tab live sync — data changes in another tab appear instantly
+  window.addEventListener('storage', (e) => {
+    if(e.key === STORAGE_KEY && e.newValue){
+      try{
+        if(loadFromLocalStorage()){
+          if(state.currentView === 'dashboard') renderDashboardPage(state.currentDashboardPage);
+          renderNotifications();
+          const cc = $('#cartCount');
+          if(cc) cc.textContent = state.cartCount;
+        }
+      }catch(err){ /* ignore */ }
+    }
+  });
+
+  // Refresh live view when returning to the app
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden && state.currentView === 'dashboard' && state.currentDashboardPage === 'ai' && !aiBusy){
+      renderDashboardPage('ai');
+    }
+  });
 
   // Welcome toast
   setTimeout(() => {
